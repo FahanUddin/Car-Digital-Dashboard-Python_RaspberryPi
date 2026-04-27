@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+
+# Pygame / logs / temp files
+*.log
+*.tmp
+*.bak
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Build/output folders
+build/
+dist/
+out/
+
+# Large media/generated files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.zip
+*.tar.gz
+*.dmg
+*.iso
+
+# Environment/config secrets
+.env
+.env.*
