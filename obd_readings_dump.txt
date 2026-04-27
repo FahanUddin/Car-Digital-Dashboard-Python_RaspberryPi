@@ -1,0 +1,73 @@
+Port: /dev/cu.usbserial-A77IPOSO
+Connected: True
+Timestamp: 2026-04-26 14:26:44
+
+Supported command count: 65
+
+READINGS:
+--------------------------------------------------------------------------------
+b'0100': Supported PIDs [01-20]          -> 10111110001111101011100000010001
+b'0101': Status since DTCs cleared       -> <obd.OBDResponse.Status object at 0x115ba3350>
+b'0103': Fuel System Status              -> ('Closed loop, using oxygen sensor feedback to determine fuel mix', '')
+b'0104': Calculated Engine Load          -> 1.9607843137254901 percent
+b'0105': Engine Coolant Temperature      -> 79 degree_Celsius
+b'0106': Short Term Fuel Trim - Bank 1   -> -84.375 percent
+b'0107': Long Term Fuel Trim - Bank 1    -> 89.84375 percent
+b'010B': Intake Manifold Pressure        -> 35 kilopascal
+b'010C': Engine RPM                      -> 752.0 revolutions_per_minute
+b'010D': Vehicle Speed                   -> 0.0 kilometer_per_hour
+b'010E': Timing Advance                  -> -64.0 degree
+b'010F': Intake Air Temp                 -> 29 degree_Celsius
+b'0111': Throttle Position               -> 14.117647058823529 percent
+b'0113': O2 Sensors Present              -> ((), (False, False, False, False), (False, False, True, True))
+b'0114': O2: Bank 1 - Sensor 1 Voltage   -> 0.5 volt
+b'0115': O2: Bank 1 - Sensor 2 Voltage   -> 0.0 volt
+b'011C': OBD Standards Compliance        -> EOBD (Europe)
+b'0120': Supported PIDs [21-40]          -> 10000000000000100010000000000001
+b'0121': Distance Traveled with MIL on   -> 0.0 kilometer
+b'012F': Fuel Level Input                -> 21.96078431372549 percent
+b'0133': Barometric Pressure             -> 101 kilopascal
+b'0140': Supported PIDs [41-60]          -> 11000000110000000000000000000000
+b'0141': Monitor status this drive cycle -> <obd.OBDResponse.Status object at 0x115c4ca10>
+b'0142': Control module voltage          -> 14.062000000000001 volt
+b'0149': Accelerator pedal position D    -> 19.607843137254903 percent
+b'014A': Accelerator pedal position E    -> 19.607843137254903 percent
+b'0201': DTC Status since DTCs cleared   -> NO DATA
+b'0203': DTC Fuel System Status          -> NO DATA
+b'0204': DTC Calculated Engine Load      -> NO DATA
+b'0205': DTC Engine Coolant Temperature  -> NO DATA
+b'0206': DTC Short Term Fuel Trim - Bank 1 -> NO DATA
+b'0207': DTC Long Term Fuel Trim - Bank 1 -> NO DATA
+b'020B': DTC Intake Manifold Pressure    -> NO DATA
+b'020C': DTC Engine RPM                  -> NO DATA
+b'020D': DTC Vehicle Speed               -> NO DATA
+b'020E': DTC Timing Advance              -> NO DATA
+b'020F': DTC Intake Air Temp             -> NO DATA
+b'0211': DTC Throttle Position           -> NO DATA
+b'0213': DTC O2 Sensors Present          -> NO DATA
+b'0214': DTC O2: Bank 1 - Sensor 1 Voltage -> NO DATA
+b'0215': DTC O2: Bank 1 - Sensor 2 Voltage -> NO DATA
+b'021C': DTC OBD Standards Compliance    -> NO DATA
+b'0220': DTC Supported PIDs [21-40]      -> NO DATA
+b'0221': DTC Distance Traveled with MIL on -> NO DATA
+b'022F': DTC Fuel Level Input            -> NO DATA
+b'0233': DTC Barometric Pressure         -> NO DATA
+b'0240': DTC Supported PIDs [41-60]      -> NO DATA
+b'0241': DTC Monitor status this drive cycle -> NO DATA
+b'0242': DTC Control module voltage      -> NO DATA
+b'0249': DTC Accelerator pedal position D -> NO DATA
+b'024A': DTC Accelerator pedal position E -> NO DATA
+b'03': Get DTCs                          -> []
+b'04': Clear DTCs and Freeze data        -> NO DATA
+b'0600': Supported MIDs [01-20]          -> 10000000000000000000000000000001
+b'0601': O2 Sensor Monitor Bank 1 - Sensor 1 -> Unknown : 0.779786 percent [PASSED]
+b'0620': Supported MIDs [21-40]          -> 10000000000000000000000000000000
+b'0621': Catalyst Monitor Bank 1         -> Unknown : 12.999994000000001 percent [FAILED]
+b'07': Get DTCs from the current/last driving cycle -> []
+b'0900': Supported PIDs [01-20]          -> 1111000000000000000000000000000000000000
+b'0901': VIN Message Count               -> 1 count
+b'0902': Vehicle Identification Number   -> bytearray(b'                 ')
+b'0903': Calibration ID message count for PID 04 -> 1 count
+b'0904': Calibration ID                  -> bytearray(b'3S21DC54   ')
+b'ATI': ELM327 version string            -> ELM327 v1.5
+b'ATRV': Voltage detected by OBD-II adapter -> 14.1 volt
