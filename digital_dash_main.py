@@ -39,7 +39,8 @@ SHIFT_RPM_STAGE_1 = 400
 SHIFT_RPM_STAGE_2 = 3000
 SHIFT_RPM_STAGE_3 = 5500
 
-START_ODOMETER_MI = 115316.0
+START_ODOMETER_MI = 72485.0
+ODOMETER_SAVE_FILE = Path(__file__).resolve().parent / "odometer.txt"
 
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 
@@ -262,7 +263,9 @@ class DashApp:
         self.display_speed = 0.0
         self.display_rpm = 0.0
         self.rpm_deadband = 20.0
-        self.virtual_odometer_mi = START_ODOMETER_MI
+        self.virtual_odometer_mi = self.load_virtual_odometer()
+        self.last_odometer_save_time = time.time()
+        self.odometer_save_interval = 5.0
 
         self.font_speed = pygame.font.SysFont("dejavusans", 68, bold=True)
         self.font_mph = pygame.font.SysFont("dejavusans", 22, bold=True)
@@ -298,6 +301,21 @@ class DashApp:
         self.show_sweep = False
         self.sweep_started_at = 0.0
         self.sweep_duration = 1.6
+
+    def load_virtual_odometer(self) -> float:
+        try:
+            if ODOMETER_SAVE_FILE.exists():
+                value = float(ODOMETER_SAVE_FILE.read_text().strip())
+                return max(0.0, value)
+        except Exception:
+            pass
+        return START_ODOMETER_MI
+
+    def save_virtual_odometer(self) -> None:
+        try:
+            ODOMETER_SAVE_FILE.write_text(f"{self.virtual_odometer_mi:.6f}")
+        except Exception:
+            pass
 
     def run(self) -> None:
         running = True
@@ -339,8 +357,15 @@ class DashApp:
                     self.last_data = self.demo.auto_tick(dt)
                     self.last_data.source = "demo"
 
-            distance_delta_mi = max(0.0, self.last_data.speed_mph) * dt / 3600.0
-            self.virtual_odometer_mi += distance_delta_mi
+            if not self.use_demo:
+                distance_delta_mi = max(0.0, self.last_data.speed_mph) * dt / 3600.0
+                self.virtual_odometer_mi += distance_delta_mi
+
+                now_save = time.time()
+                if now_save - self.last_odometer_save_time >= self.odometer_save_interval:
+                    self.save_virtual_odometer()
+                    self.last_odometer_save_time = now_save
+
             self.last_data.odometer_mi = self.virtual_odometer_mi
 
             speed_smooth = min(1.0, dt * 18.0)
@@ -387,6 +412,7 @@ class DashApp:
             self.draw(self.last_data)
             pygame.display.flip()
 
+        self.save_virtual_odometer()
         pygame.quit()
         sys.exit(0)
 
