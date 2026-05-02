@@ -15,8 +15,13 @@ except Exception:
     obd = None
 
 
-WIDTH = 1280
-HEIGHT = 480
+APP_WIDTH = 1280
+APP_HEIGHT = 480
+DISPLAY_WIDTH = 1920
+DISPLAY_HEIGHT = 720
+
+WIDTH = APP_WIDTH
+HEIGHT = APP_HEIGHT
 FPS = 60
 
 BG = (4, 6, 10)
@@ -54,10 +59,10 @@ LEFT_NEEDLE_PIVOT = (0.18, 0.50)
 RIGHT_NEEDLE_PIVOT = (0.82, 0.50)
 LEFT_NEEDLE_BASE_ANGLE = 225.0
 RIGHT_NEEDLE_BASE_ANGLE = 135.0
-LEFT_NEEDLE_MIN_ANGLE = 120.0
+LEFT_NEEDLE_MIN_ANGLE = 123.0
 LEFT_NEEDLE_MAX_ANGLE = 320.5
-RIGHT_NEEDLE_MIN_ANGLE = 70.5
-RIGHT_NEEDLE_MAX_ANGLE = -125.5
+RIGHT_NEEDLE_MIN_ANGLE = 61.0
+RIGHT_NEEDLE_MAX_ANGLE = -119.3
 
 
 @dataclass
@@ -258,11 +263,21 @@ class DashApp:
     def __init__(self) -> None:
         pygame.init()
         pygame.display.set_caption("Giulietta Digital Dash")
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        self.display = pygame.display.set_mode((DISPLAY_WIDTH, DISPLAY_HEIGHT), pygame.FULLSCREEN)
+        self.screen = pygame.Surface((WIDTH, HEIGHT)).convert_alpha()
         self.clock = pygame.time.Clock()
+
         self.display_speed = 0.0
+        self.raw_rpm_live = 0.0
         self.display_rpm = 0.0
-        self.rpm_deadband = 20.0
+        self.raw_rpm_filtered = 0.0
+
+        self.rpm_input_alpha_up = 0.90
+        self.rpm_input_alpha_down = 0.18
+        self.rpm_follow_rate_up = 14000.0
+        self.rpm_follow_rate_down = 4200.0
+        self.rpm_snap_small_error = 8.0
+
         self.virtual_odometer_mi = self.load_virtual_odometer()
         self.last_odometer_save_time = time.time()
         self.odometer_save_interval = 5.0
@@ -317,10 +332,129 @@ class DashApp:
         except Exception:
             pass
 
+    def present_canvas_centered(self) -> None:
+        scale = min(DISPLAY_WIDTH / WIDTH, DISPLAY_HEIGHT / HEIGHT)
+        draw_w = max(1, int(WIDTH * scale))
+        draw_h = max(1, int(HEIGHT * scale))
+        scaled = pygame.transform.smoothscale(self.screen, (draw_w, draw_h))
+
+        x = (DISPLAY_WIDTH - draw_w) // 2
+        y = (DISPLAY_HEIGHT - draw_h) // 2
+
+        self.display.fill((0, 0, 0))
+        self.display.blit(scaled, (x, y))
+
+    def update_rpm_display(self, raw_rpm: float, dt: float) -> float:
+        self.raw_rpm_live = raw_rpm
+
+        if self.raw_rpm_filtered <= 0.0:
+            self.raw_rpm_filtered = raw_rpm
+            self.display_rpm = raw_rpm
+            return self.display_rpm
+
+        alpha = self.rpm_input_alpha_up if raw_rpm >= self.raw_rpm_filtered else self.rpm_input_alpha_down
+        self.raw_rpm_filtered += (raw_rpm - self.raw_rpm_filtered) * alpha
+
+        rpm_error = self.raw_rpm_filtered - self.display_rpm
+
+        if rpm_error > 0.0:
+            max_step = self.rpm_follow_rate_up * dt
+            self.display_rpm += min(rpm_error, max_step)
+        elif rpm_error < 0.0:
+            max_step = self.rpm_follow_rate_down * dt
+            self.display_rpm -= min(abs(rpm_error), max_step)
+            self.display_rpm += (self.raw_rpm_filtered - self.display_rpm) * min(1.0, dt * 3.5)
+
+        if abs(self.raw_rpm_filtered - self.display_rpm) < self.rpm_snap_small_error:
+            self.display_rpm = self.raw_rpm_filtered
+
+        return self.display_rpm
+
+    def draw_startup_screen(self) -> None:
+        self.screen.fill((0, 0, 0))
+
+        bg = self.pre_scaled_assets.get("startup_image")
+        if bg is not None:
+            bg_rect = bg.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 10))
+            self.screen.blit(bg, bg_rect)
+        else:
+            title = self.font_speed.render("ALFA ROMEO", True, WHITE)
+            title_rect = title.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 20))
+            self.screen.blit(title, title_rect)
+
+        dots = "." * (int((time.time() - self.startup_started_at) * 2.5) % 4)
+        status = self.font_mid.render(dots, True, SOFT)
+        status_rect = status.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 150))
+        self.screen.blit(status, status_rect)
+
+    def draw_intro_frame(self, t: float, live_data: CarData) -> None:
+        eased = 1.0 - (1.0 - t) * (1.0 - t)
+        scale = 0.88 + 0.12 * eased
+        alpha = int(255 * eased)
+
+        self.draw_background()
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+
+        left_dial = self.pre_scaled_assets.get("left_dial")
+        right_dial = self.pre_scaled_assets.get("right_dial")
+
+        speed = self.font_speed.render(str(int(round(0))), True, WHITE)
+        mph = self.font_mph.render("MPH", True, WHITE)
+        odo = self.font_mid.render(self.format_mileage(live_data.odometer_mi), True, SOFT)
+
+        def blit_scaled_centered(surface: pygame.Surface, center: tuple[int, int]) -> None:
+            w = max(1, int(surface.get_width() * scale))
+            h = max(1, int(surface.get_height() * scale))
+            scaled = pygame.transform.smoothscale(surface, (w, h)).copy()
+            scaled.set_alpha(alpha)
+            rect = scaled.get_rect(center=center)
+            overlay.blit(scaled, rect)
+
+        if left_dial is not None:
+            blit_scaled_centered(left_dial, LEFT_DIAL_CENTER)
+
+        if right_dial is not None:
+            blit_scaled_centered(right_dial, RIGHT_DIAL_CENTER)
+
+        blit_scaled_centered(speed, (WIDTH // 2, 200))
+        blit_scaled_centered(mph, (WIDTH // 2, 120))
+        blit_scaled_centered(odo, (WIDTH // 2, 370))
+
+        self.screen.blit(overlay, (0, 0))
+        self.draw_footer(live_data)
+
+    def draw_sweep_frame(self, t: float, live_data: CarData) -> None:
+        if t < 0.5:
+            phase = t / 0.5
+        else:
+            phase = 1.0 - ((t - 0.5) / 0.5)
+
+        phase = phase * phase * (3.0 - 2.0 * phase)
+
+        sweep_speed = 160.0 * phase
+        sweep_rpm = 8000.0 * phase
+
+        draw_data = CarData(
+            speed_mph=sweep_speed,
+            rpm=sweep_rpm,
+            coolant_c=live_data.coolant_c,
+            fuel_pct=live_data.fuel_pct,
+            intake_c=live_data.intake_c,
+            voltage=live_data.voltage,
+            odometer_mi=live_data.odometer_mi,
+            est_hp=live_data.est_hp,
+            inst_mpg=live_data.inst_mpg,
+            connected=live_data.connected,
+            source=live_data.source,
+        )
+
+        self.draw(draw_data, use_live_smoothed=False)
+
     def run(self) -> None:
         running = True
         while running:
             dt = self.clock.tick(FPS) / 1000.0
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -331,11 +465,10 @@ class DashApp:
                         pygame.display.toggle_fullscreen()
                     elif event.key == pygame.K_d:
                         self.use_demo = not self.use_demo
-                        if self.use_demo:
-                            self.show_startup = False
-                            self.show_intro = True
-                            self.intro_started_at = time.time()
-                            self.show_sweep = False
+                        self.show_startup = False
+                        self.show_intro = True
+                        self.intro_started_at = time.time()
+                        self.show_sweep = False
                     elif event.key == pygame.K_UP:
                         self.demo.update_manual(speed_delta=2, rpm_delta=180)
                     elif event.key == pygame.K_DOWN:
@@ -369,23 +502,18 @@ class DashApp:
             self.last_data.odometer_mi = self.virtual_odometer_mi
 
             speed_smooth = min(1.0, dt * 18.0)
-            rpm_smooth = min(1.0, dt * 24.0)
-
             self.display_speed += (self.last_data.speed_mph - self.display_speed) * speed_smooth
-            rpm_error = self.last_data.rpm - self.display_rpm
-            if abs(rpm_error) > self.rpm_deadband:
-                self.display_rpm += rpm_error * rpm_smooth
+            self.update_rpm_display(self.last_data.rpm, dt)
 
             if self.show_startup:
-                connected_now = self.last_data.connected or self.use_demo
                 min_time_done = (time.time() - self.startup_started_at) >= self.startup_min_time
-
-                if connected_now and min_time_done:
+                if min_time_done:
                     self.show_startup = False
                     self.show_intro = True
                     self.intro_started_at = time.time()
                 else:
                     self.draw_startup_screen()
+                    self.present_canvas_centered()
                     pygame.display.flip()
                     continue
 
@@ -397,6 +525,7 @@ class DashApp:
                     self.sweep_started_at = time.time()
                 else:
                     self.draw_intro_frame(elapsed / self.intro_duration, self.last_data)
+                    self.present_canvas_centered()
                     pygame.display.flip()
                     continue
 
@@ -406,10 +535,12 @@ class DashApp:
                     self.show_sweep = False
                 else:
                     self.draw_sweep_frame(elapsed / self.sweep_duration, self.last_data)
+                    self.present_canvas_centered()
                     pygame.display.flip()
                     continue
 
             self.draw(self.last_data)
+            self.present_canvas_centered()
             pygame.display.flip()
 
         self.save_virtual_odometer()
@@ -495,91 +626,10 @@ class DashApp:
                 ),
             )
 
-    def draw_startup_screen(self) -> None:
-        self.screen.fill((0, 0, 0))
-
-        bg = self.pre_scaled_assets.get("startup_image")
-        if bg is not None:
-            bg_rect = bg.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 10))
-            self.screen.blit(bg, bg_rect)
-        else:
-            title = self.font_speed.render("ALFA ROMEO", True, WHITE)
-            title_rect = title.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 20))
-            self.screen.blit(title, title_rect)
-
-        dots = "." * (int((time.time() - self.startup_started_at) * 2.5) % 4)
-        status = self.font_mid.render(f"{dots}", True, SOFT)
-        status_rect = status.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 150))
-        self.screen.blit(status, status_rect)
-
-    def draw_intro_frame(self, t: float, live_data: CarData) -> None:
-        eased = 1.0 - (1.0 - t) * (1.0 - t)
-        scale = 0.88 + 0.12 * eased
-        alpha = int(255 * eased)
-
-        self.draw_background()
-
-        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-
-        left_dial = self.pre_scaled_assets.get("left_dial")
-        right_dial = self.pre_scaled_assets.get("right_dial")
-
-        speed = self.font_speed.render(str(int(round(0))), True, WHITE)
-        mph = self.font_mph.render("MPH", True, WHITE)
-        odo = self.font_mid.render(self.format_mileage(live_data.odometer_mi), True, SOFT)
-
-        def blit_scaled_centered(surface: pygame.Surface, center: tuple[int, int]) -> None:
-            w = max(1, int(surface.get_width() * scale))
-            h = max(1, int(surface.get_height() * scale))
-            scaled = pygame.transform.smoothscale(surface, (w, h)).copy()
-            scaled.set_alpha(alpha)
-            rect = scaled.get_rect(center=center)
-            overlay.blit(scaled, rect)
-
-        if left_dial is not None:
-            blit_scaled_centered(left_dial, LEFT_DIAL_CENTER)
-
-        if right_dial is not None:
-            blit_scaled_centered(right_dial, RIGHT_DIAL_CENTER)
-
-        blit_scaled_centered(speed, (WIDTH // 2, 200))
-        blit_scaled_centered(mph, (WIDTH // 2, 120))
-        blit_scaled_centered(odo, (WIDTH // 2, 370))
-
-        self.screen.blit(overlay, (0, 0))
-        self.draw_footer(live_data)
-
-    def draw_sweep_frame(self, t: float, live_data: CarData) -> None:
-        if t < 0.5:
-            phase = t / 0.5
-        else:
-            phase = 1.0 - ((t - 0.5) / 0.5)
-
-        phase = phase * phase * (3.0 - 2.0 * phase)
-
-        sweep_speed = 160.0 * phase
-        sweep_rpm = 8000.0 * phase
-
+    def draw(self, data: CarData, use_live_smoothed: bool = True) -> None:
         draw_data = CarData(
-            speed_mph=sweep_speed,
-            rpm=sweep_rpm,
-            coolant_c=live_data.coolant_c,
-            fuel_pct=live_data.fuel_pct,
-            intake_c=live_data.intake_c,
-            voltage=live_data.voltage,
-            odometer_mi=live_data.odometer_mi,
-            est_hp=live_data.est_hp,
-            inst_mpg=live_data.inst_mpg,
-            connected=live_data.connected,
-            source=live_data.source,
-        )
-
-        self.draw(draw_data)
-
-    def draw(self, data: CarData) -> None:
-        draw_data = CarData(
-            speed_mph=data.speed_mph if self.show_sweep else self.display_speed,
-            rpm=data.rpm if self.show_sweep else self.display_rpm,
+            speed_mph=self.display_speed if use_live_smoothed else data.speed_mph,
+            rpm=self.display_rpm if use_live_smoothed else data.rpm,
             coolant_c=data.coolant_c,
             fuel_pct=data.fuel_pct,
             intake_c=data.intake_c,
@@ -634,8 +684,17 @@ class DashApp:
             self.draw_fuel_subgauge((190, 325), data.fuel_pct)
 
         if self.pre_scaled_assets.get("left_needle") is not None:
-            angle = self.map_value_to_angle(data.speed_mph, 0.0, 160.0, LEFT_NEEDLE_MIN_ANGLE, LEFT_NEEDLE_MAX_ANGLE)
-            self.draw_rotated_needle("left_needle", LEFT_DIAL_CENTER, angle, LEFT_NEEDLE_BASE_ANGLE, LEFT_NEEDLE_SCALE, LEFT_NEEDLE_PIVOT)
+            angle = self.map_value_to_angle(
+                data.speed_mph, 0.0, 160.0, LEFT_NEEDLE_MIN_ANGLE, LEFT_NEEDLE_MAX_ANGLE
+            )
+            self.draw_rotated_needle(
+                "left_needle",
+                LEFT_DIAL_CENTER,
+                angle,
+                LEFT_NEEDLE_BASE_ANGLE,
+                LEFT_NEEDLE_SCALE,
+                LEFT_NEEDLE_PIVOT,
+            )
         else:
             self.draw_speed_needle(LEFT_DIAL_CENTER, 185, data.speed_mph, 160)
 
@@ -674,8 +733,17 @@ class DashApp:
             self.draw_temp_subgauge((1090, 325), data.coolant_c)
 
         if self.pre_scaled_assets.get("right_needle") is not None:
-            angle = self.map_value_to_angle(data.rpm, 0.0, 8000.0, RIGHT_NEEDLE_MIN_ANGLE, RIGHT_NEEDLE_MAX_ANGLE)
-            self.draw_rotated_needle("right_needle", RIGHT_DIAL_CENTER, angle, RIGHT_NEEDLE_BASE_ANGLE, RIGHT_NEEDLE_SCALE, RIGHT_NEEDLE_PIVOT)
+            angle = self.map_value_to_angle(
+                data.rpm, 0.0, 8000.0, RIGHT_NEEDLE_MIN_ANGLE, RIGHT_NEEDLE_MAX_ANGLE
+            )
+            self.draw_rotated_needle(
+                "right_needle",
+                RIGHT_DIAL_CENTER,
+                angle,
+                RIGHT_NEEDLE_BASE_ANGLE,
+                RIGHT_NEEDLE_SCALE,
+                RIGHT_NEEDLE_PIVOT,
+            )
         else:
             self.draw_rpm_needle(RIGHT_DIAL_CENTER, 165, data.rpm / 1000.0, 8)
 
@@ -685,6 +753,10 @@ class DashApp:
         label_rect = rpm_label.get_rect(center=(RIGHT_DIAL_CENTER[0], RIGHT_DIAL_CENTER[1] - 20))
         self.screen.blit(rpm_digits, rpm_rect)
         self.screen.blit(rpm_label, label_rect)
+
+        rpm_raw_small = self.font_tiny.render(f"RAW {int(round(self.raw_rpm_live))}", True, SOFT)
+        rpm_raw_rect = rpm_raw_small.get_rect(center=(RIGHT_DIAL_CENTER[0], RIGHT_DIAL_CENTER[1] + 36))
+        self.screen.blit(rpm_raw_small, rpm_raw_rect)
 
     def draw_shift_alert(self, data: CarData) -> None:
         rpm = data.rpm
@@ -704,35 +776,25 @@ class DashApp:
 
         left_colors = [off_color, off_color, off_color]
         right_colors = [off_color, off_color, off_color]
-        show_text = True
         text_color = (60, 60, 65)
 
         if 400 <= rpm < 3000:
             left_colors[2] = GREEN
             right_colors[2] = GREEN
-            text_color = (60, 60, 65)
-
         elif 3000 <= rpm < 5500:
             left_colors[1] = AMBER
             left_colors[2] = GREEN
             right_colors[1] = AMBER
             right_colors[2] = GREEN
-            text_color = (60, 60, 65)
-
         elif rpm >= 5500:
             left_colors[1] = AMBER
             left_colors[2] = GREEN
             right_colors[1] = AMBER
             right_colors[2] = GREEN
-
             if flash_on:
                 left_colors[0] = RED
                 right_colors[0] = RED
                 text_color = WHITE
-            else:
-                left_colors[0] = off_color
-                right_colors[0] = off_color
-                text_color = (60, 60, 65)
 
         for i in range(3):
             x = left_start_x - i * (shape_w + gap)
@@ -742,10 +804,9 @@ class DashApp:
             x = right_start_x + i * (shape_w + gap)
             self.draw_rhombus(x, alert_y, shape_w, shape_h, right_colors[i], flip=True)
 
-        if show_text:
-            shift_surf = self.font_big.render("SHIFT", True, text_color)
-            shift_rect = shift_surf.get_rect(center=(WIDTH // 2, alert_y))
-            self.screen.blit(shift_surf, shift_rect)
+        shift_surf = self.font_big.render("SHIFT", True, text_color)
+        shift_rect = shift_surf.get_rect(center=(WIDTH // 2, alert_y))
+        self.screen.blit(shift_surf, shift_rect)
 
     def draw_rhombus(
         self,
@@ -791,7 +852,16 @@ class DashApp:
             self.draw_card(x, 401, label, value, color, ratio, caps)
             x += 200
 
-    def draw_card(self, x: int, y: int, label: str, value: str, color, ratio: Optional[float], caps: Optional[Tuple[str, str]]) -> None:
+    def draw_card(
+        self,
+        x: int,
+        y: int,
+        label: str,
+        value: str,
+        color,
+        ratio: Optional[float],
+        caps: Optional[Tuple[str, str]],
+    ) -> None:
         self.screen.blit(self.font_tiny.render(label, True, WHITE), (x, y))
         self.screen.blit(self.font_small.render(value, True, color), (x, y + 12))
         if ratio is not None and caps is not None:
@@ -853,6 +923,27 @@ class DashApp:
         draw_center = pygame.math.Vector2(center[0], center[1]) - rotated_offset
         rect = rotated.get_rect(center=(round(draw_center.x), round(draw_center.y)))
         self.screen.blit(rotated, rect)
+
+    def draw_arc(
+        self,
+        center: Tuple[int, int],
+        radius: int,
+        start_deg: float,
+        end_deg: float,
+        color: Tuple[int, int, int],
+        width: int,
+    ) -> None:
+        steps = max(20, int(abs(end_deg - start_deg) * 1.6))
+        points = []
+        for i in range(steps + 1):
+            deg = start_deg + (end_deg - start_deg) * (i / steps)
+            points.append(self.polar(center, radius, deg))
+        pygame.draw.lines(self.screen, color, False, points, width)
+
+    @staticmethod
+    def polar(center: Tuple[int, int], radius: float, deg: float) -> Tuple[int, int]:
+        rad = math.radians(deg)
+        return int(center[0] + math.cos(rad) * radius), int(center[1] + math.sin(rad) * radius)
 
     @staticmethod
     def map_value_to_angle(value: float, min_value: float, max_value: float, start_angle: float, end_angle: float) -> float:
@@ -927,44 +1018,6 @@ class DashApp:
         self.screen.blit(self.font_small.render("C", True, WHITE), (1026, 335))
         self.screen.blit(self.font_small.render("H", True, RED), (1150, 335))
 
-    def draw_speed_sign(self, x: int, y: int) -> None:
-        rect = pygame.Rect(x, y, 40, 52)
-        pygame.draw.rect(self.screen, WHITE, rect, border_radius=5)
-        pygame.draw.rect(self.screen, (15, 15, 15), rect, 2, border_radius=5)
-        self.screen.blit(self.font_tiny.render("SPEED", True, (15, 15, 15)), (x + 4, y + 4))
-        self.screen.blit(self.font_tiny.render("LIMIT", True, (15, 15, 15)), (x + 5, y + 15))
-        self.screen.blit(self.font_mid.render("35", True, (15, 15, 15)), (x + 9, y + 25))
-
-    def draw_car(self, x: int, y: int) -> None:
-        body = [(x - 30, y + 18), (x - 38, y + 8), (x - 28, y - 10), (x - 10, y - 22), (x + 10, y - 22), (x + 28, y - 10), (x + 38, y + 8), (x + 30, y + 18)]
-        pygame.draw.polygon(self.screen, (190, 192, 198), body)
-        glass = [(x - 14, y - 8), (x - 6, y - 18), (x + 6, y - 18), (x + 14, y - 8), (x + 10, y + 3), (x - 10, y + 3)]
-        pygame.draw.polygon(self.screen, (45, 48, 55), glass)
-        pygame.draw.circle(self.screen, (20, 20, 20), (x - 20, y + 18), 5)
-        pygame.draw.circle(self.screen, (20, 20, 20), (x + 20, y + 18), 5)
-        pygame.draw.circle(self.screen, RED, (x - 22, y + 7), 3)
-        pygame.draw.circle(self.screen, RED, (x + 22, y + 7), 3)
-
-    def draw_glow(self, center: Tuple[int, int], color: Tuple[int, int, int], radius: int) -> None:
-        surf = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
-        for r in range(radius, 0, -8):
-            alpha = max(1, int(18 * (r / radius) ** 2))
-            pygame.draw.circle(surf, (*color, alpha), (radius, radius), r)
-        self.screen.blit(surf, (center[0] - radius, center[1] - radius), special_flags=pygame.BLEND_RGBA_ADD)
-
-    def draw_arc(self, center: Tuple[int, int], radius: int, start_deg: float, end_deg: float, color: Tuple[int, int, int], width: int) -> None:
-        steps = max(20, int(abs(end_deg - start_deg) * 1.6))
-        points = []
-        for i in range(steps + 1):
-            deg = start_deg + (end_deg - start_deg) * (i / steps)
-            points.append(self.polar(center, radius, deg))
-        pygame.draw.lines(self.screen, color, False, points, width)
-
-    @staticmethod
-    def polar(center: Tuple[int, int], radius: float, deg: float) -> Tuple[int, int]:
-        rad = math.radians(deg)
-        return int(center[0] + math.cos(rad) * radius), int(center[1] + math.sin(rad) * radius)
-
     @staticmethod
     def format_temp_f(value_c: Optional[float]) -> str:
         if value_c is None:
@@ -978,12 +1031,6 @@ class DashApp:
     @staticmethod
     def format_voltage(value: Optional[float]) -> str:
         return "--.-V" if value is None else f"{value:.1f}V"
-
-    @staticmethod
-    def format_hp(value: Optional[float]) -> str:
-        if value is None:
-            return "-- hp"
-        return f"{int(round(value))} hp"
 
     @staticmethod
     def format_mpg(value: Optional[float]) -> str:
@@ -1010,10 +1057,6 @@ class DashApp:
         if index == 2:
             return 0.0 if data.fuel_pct is None else max(0.0, min(1.0, data.fuel_pct / 100.0))
         return 0.0 if data.voltage is None else max(0.0, min(1.0, (data.voltage - 11.5) / 3.0))
-
-    @staticmethod
-    def trip_value(data: CarData) -> float:
-        return 125.4 + data.speed_mph * 0.03
 
     @staticmethod
     def format_mileage(value: Optional[float]) -> str:
