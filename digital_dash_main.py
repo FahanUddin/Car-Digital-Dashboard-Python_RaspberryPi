@@ -15,8 +15,11 @@ except Exception:
     obd = None
 
 
-APP_WIDTH = 1280
-APP_HEIGHT = 480
+BASE_WIDTH = 1280
+BASE_HEIGHT = 480
+
+APP_WIDTH = 1440
+APP_HEIGHT = 540
 DISPLAY_WIDTH = 1920
 DISPLAY_HEIGHT = 720
 
@@ -49,10 +52,11 @@ ODOMETER_SAVE_FILE = Path(__file__).resolve().parent / "odometer.txt"
 
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 
-LEFT_DIAL_CENTER = (235, 235)
-RIGHT_DIAL_CENTER = (1045, 235)
-LEFT_DIAL_SIZE = 440
-RIGHT_DIAL_SIZE = 440
+LEFT_DIAL_CENTER_BASE = (235, 235)
+RIGHT_DIAL_CENTER_BASE = (1045, 235)
+LEFT_DIAL_SIZE_BASE = 440
+RIGHT_DIAL_SIZE_BASE = 440
+
 LEFT_NEEDLE_SCALE = 0.34
 RIGHT_NEEDLE_SCALE = 0.34
 LEFT_NEEDLE_PIVOT = (0.18, 0.50)
@@ -74,7 +78,8 @@ class CarData:
     intake_c: Optional[float] = None
     voltage: Optional[float] = None
     odometer_mi: Optional[float] = None
-    est_hp: Optional[float] = None
+    engine_load_pct: Optional[float] = None
+    boost_pct: Optional[float] = None
     inst_mpg: Optional[float] = None
     connected: bool = False
     source: str = "demo"
@@ -93,6 +98,8 @@ class OBDReader:
         self.cached_intake = None
         self.cached_voltage = None
         self.cached_map = None
+        self.cached_engine_load = None
+        self.cached_baro = None
 
     def connect(self) -> None:
         if obd is None:
@@ -138,12 +145,16 @@ class OBDReader:
             self.cached_intake = self._query_value(obd.commands.INTAKE_TEMP)
             self.cached_voltage = self._query_value(obd.commands.ELM_VOLTAGE)
             self.cached_map = self._query_value(obd.commands.INTAKE_PRESSURE)
+            self.cached_engine_load = self._query_value(obd.commands.ENGINE_LOAD)
+            self.cached_baro = self._query_value(obd.commands.BAROMETRIC_PRESSURE)
 
         coolant = self.cached_coolant
         fuel = self.cached_fuel
         intake = self.cached_intake
         voltage = self.cached_voltage
         map_pressure = self.cached_map
+        engine_load = self.cached_engine_load
+        baro = self.cached_baro
 
         try:
             data.speed_mph = float(speed.to("mph").magnitude) if speed is not None else 0.0
@@ -175,31 +186,30 @@ class OBDReader:
         except Exception:
             data.voltage = None
 
+        try:
+            data.engine_load_pct = float(engine_load.magnitude) if engine_load is not None else None
+        except Exception:
+            data.engine_load_pct = None
+
+        try:
+            if map_pressure is not None and baro is not None:
+                map_kpa = float(map_pressure.magnitude)
+                baro_kpa = float(baro.magnitude)
+                boost_psi = max(0.0, (map_kpa - baro_kpa) * 0.145038)
+                max_boost_psi = 17.5
+                data.boost_pct = max(0.0, min(100.0, (boost_psi / max_boost_psi) * 100.0))
+            else:
+                data.boost_pct = None
+        except Exception:
+            data.boost_pct = None
+
         data.odometer_mi = None
 
         try:
-            engine_displacement_l = 1.4
-            volumetric_efficiency = 0.82
-
-            if map_pressure is not None and data.intake_c is not None and data.rpm > 0:
-                map_kpa = float(map_pressure.magnitude)
-                intake_k = data.intake_c + 273.15
-                airflow_index = (
-                    map_kpa
-                    * data.rpm
-                    * engine_displacement_l
-                    * volumetric_efficiency
-                ) / intake_k
-                data.est_hp = max(0.0, airflow_index * 3.2)
-            else:
-                data.est_hp = None
-        except Exception:
-            data.est_hp = None
-
-        try:
-            if data.est_hp is not None and data.est_hp > 1.0 and data.speed_mph > 1.0:
-                fuel_gph = data.est_hp / 6.17
-                data.inst_mpg = data.speed_mph / fuel_gph if fuel_gph > 0 else None
+            if data.speed_mph > 1.0 and data.engine_load_pct is not None:
+                load_factor = max(0.05, min(1.0, data.engine_load_pct / 100.0))
+                estimated_fuel_gph = 0.35 + (load_factor * 4.2)
+                data.inst_mpg = data.speed_mph / estimated_fuel_gph if estimated_fuel_gph > 0 else None
                 if data.inst_mpg is not None:
                     data.inst_mpg = max(0.0, min(99.9, data.inst_mpg))
             else:
@@ -237,10 +247,13 @@ class DemoDataSource:
         fuel = 63 - (self.t * 0.03) % 60
         intake = 30 + 3 * math.sin(self.t * 0.3)
         voltage = 13.8 + 0.12 * math.sin(self.t * 0.5)
-        est_hp = max(0.0, min(170.0, (rpm / 8000.0) * 155.0 * (0.35 + speed / 160.0)))
 
-        fuel_gph = est_hp / 6.17 if est_hp > 1.0 else 0.0
-        inst_mpg = speed / fuel_gph if fuel_gph > 0 and speed > 1.0 else None
+        engine_load_pct = max(0.0, min(100.0, (rpm / 8000.0) * 65.0 + (speed / 160.0) * 20.0))
+        demo_boost_psi = max(0.0, ((rpm - 1800.0) / 6200.0) * 17.5)
+        boost_pct = max(0.0, min(100.0, (demo_boost_psi / 17.5) * 100.0))
+
+        estimated_fuel_gph = 0.35 + (max(0.05, engine_load_pct / 100.0) * 4.2)
+        inst_mpg = speed / estimated_fuel_gph if estimated_fuel_gph > 0 and speed > 1.0 else None
         if inst_mpg is not None:
             inst_mpg = max(0.0, min(99.9, inst_mpg))
 
@@ -252,7 +265,8 @@ class DemoDataSource:
             intake_c=intake,
             voltage=voltage,
             odometer_mi=None,
-            est_hp=est_hp,
+            engine_load_pct=engine_load_pct,
+            boost_pct=boost_pct,
             inst_mpg=inst_mpg,
             connected=False,
             source="demo",
@@ -266,6 +280,15 @@ class DashApp:
         self.display = pygame.display.set_mode((DISPLAY_WIDTH, DISPLAY_HEIGHT), pygame.FULLSCREEN)
         self.screen = pygame.Surface((WIDTH, HEIGHT)).convert_alpha()
         self.clock = pygame.time.Clock()
+
+        self.sx = WIDTH / BASE_WIDTH
+        self.sy = HEIGHT / BASE_HEIGHT
+        self.savg = (self.sx + self.sy) * 0.5
+
+        self.LEFT_DIAL_CENTER = self.pt(*LEFT_DIAL_CENTER_BASE)
+        self.RIGHT_DIAL_CENTER = self.pt(*RIGHT_DIAL_CENTER_BASE)
+        self.LEFT_DIAL_SIZE = self.dx(LEFT_DIAL_SIZE_BASE)
+        self.RIGHT_DIAL_SIZE = self.dx(RIGHT_DIAL_SIZE_BASE)
 
         self.display_speed = 0.0
         self.raw_rpm_live = 0.0
@@ -282,15 +305,15 @@ class DashApp:
         self.last_odometer_save_time = time.time()
         self.odometer_save_interval = 5.0
 
-        self.font_speed = pygame.font.SysFont("dejavusans", 68, bold=True)
-        self.font_mph = pygame.font.SysFont("dejavusans", 22, bold=True)
-        self.font_tick = pygame.font.SysFont("dejavusans", 18, bold=True)
-        self.font_verybig = pygame.font.SysFont("dejavusans", 38, bold=True)
-        self.font_big = pygame.font.SysFont("dejavusans", 24, bold=True)
-        self.font_mid = pygame.font.SysFont("dejavusans", 18, bold=True)
-        self.font_small = pygame.font.SysFont("dejavusans", 14, bold=True)
-        self.font_tiny = pygame.font.SysFont("dejavusans", 12, bold=True)
-        self.font_shift = pygame.font.SysFont("dejavusans", 28, bold=True)
+        self.font_speed = self.make_font(68)
+        self.font_mph = self.make_font(22)
+        self.font_tick = self.make_font(18)
+        self.font_verybig = self.make_font(38)
+        self.font_big = self.make_font(24)
+        self.font_mid = self.make_font(18)
+        self.font_small = self.make_font(14)
+        self.font_tiny = self.make_font(12)
+        self.font_shift = self.make_font(28)
 
         self.obd_reader = OBDReader()
         self.demo = DemoDataSource()
@@ -316,6 +339,21 @@ class DashApp:
         self.show_sweep = False
         self.sweep_started_at = 0.0
         self.sweep_duration = 1.6
+
+    def dx(self, value: float) -> int:
+        return int(round(value * self.sx))
+
+    def dy(self, value: float) -> int:
+        return int(round(value * self.sy))
+
+    def ds(self, value: float) -> int:
+        return max(1, int(round(value * self.savg)))
+
+    def pt(self, x: float, y: float) -> Tuple[int, int]:
+        return self.dx(x), self.dy(y)
+
+    def make_font(self, size: int) -> pygame.font.Font:
+        return pygame.font.SysFont("dejavusans", self.ds(size), bold=True)
 
     def load_virtual_odometer(self) -> float:
         try:
@@ -375,16 +413,16 @@ class DashApp:
 
         bg = self.pre_scaled_assets.get("startup_image")
         if bg is not None:
-            bg_rect = bg.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 10))
+            bg_rect = bg.get_rect(center=(WIDTH // 2, HEIGHT // 2 - self.dy(10)))
             self.screen.blit(bg, bg_rect)
         else:
             title = self.font_speed.render("ALFA ROMEO", True, WHITE)
-            title_rect = title.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 20))
+            title_rect = title.get_rect(center=(WIDTH // 2, HEIGHT // 2 - self.dy(20)))
             self.screen.blit(title, title_rect)
 
         dots = "." * (int((time.time() - self.startup_started_at) * 2.5) % 4)
         status = self.font_mid.render(dots, True, SOFT)
-        status_rect = status.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 150))
+        status_rect = status.get_rect(center=(WIDTH // 2, HEIGHT // 2 + self.dy(150)))
         self.screen.blit(status, status_rect)
 
     def draw_intro_frame(self, t: float, live_data: CarData) -> None:
@@ -411,14 +449,14 @@ class DashApp:
             overlay.blit(scaled, rect)
 
         if left_dial is not None:
-            blit_scaled_centered(left_dial, LEFT_DIAL_CENTER)
+            blit_scaled_centered(left_dial, self.LEFT_DIAL_CENTER)
 
         if right_dial is not None:
-            blit_scaled_centered(right_dial, RIGHT_DIAL_CENTER)
+            blit_scaled_centered(right_dial, self.RIGHT_DIAL_CENTER)
 
-        blit_scaled_centered(speed, (WIDTH // 2, 200))
-        blit_scaled_centered(mph, (WIDTH // 2, 120))
-        blit_scaled_centered(odo, (WIDTH // 2, 370))
+        blit_scaled_centered(speed, (WIDTH // 2, self.dy(200)))
+        blit_scaled_centered(mph, (WIDTH // 2, self.dy(120)))
+        blit_scaled_centered(odo, (WIDTH // 2, self.dy(370)))
 
         self.screen.blit(overlay, (0, 0))
         self.draw_footer(live_data)
@@ -442,7 +480,8 @@ class DashApp:
             intake_c=live_data.intake_c,
             voltage=live_data.voltage,
             odometer_mi=live_data.odometer_mi,
-            est_hp=live_data.est_hp,
+            engine_load_pct=live_data.engine_load_pct,
+            boost_pct=live_data.boost_pct,
             inst_mpg=live_data.inst_mpg,
             connected=live_data.connected,
             source=live_data.source,
@@ -584,7 +623,7 @@ class DashApp:
             )
         if self.assets.get("startup_image") is not None:
             startup = self.assets["startup_image"]
-            target_w = WIDTH - 140
+            target_w = WIDTH - self.dx(140)
             scale = target_w / startup.get_width()
             target_h = max(1, int(startup.get_height() * scale))
             self.pre_scaled_assets["startup_image"] = pygame.transform.smoothscale(
@@ -593,37 +632,17 @@ class DashApp:
 
         if self.assets.get("left_dial") is not None:
             self.pre_scaled_assets["left_dial"] = pygame.transform.smoothscale(
-                self.assets["left_dial"], (LEFT_DIAL_SIZE, LEFT_DIAL_SIZE)
+                self.assets["left_dial"], (self.LEFT_DIAL_SIZE, self.LEFT_DIAL_SIZE)
             )
 
         if self.assets.get("right_dial") is not None:
             self.pre_scaled_assets["right_dial"] = pygame.transform.smoothscale(
-                self.assets["right_dial"], (RIGHT_DIAL_SIZE, RIGHT_DIAL_SIZE)
+                self.assets["right_dial"], (self.RIGHT_DIAL_SIZE, self.RIGHT_DIAL_SIZE)
             )
 
         if self.assets.get("bezel") is not None:
             self.pre_scaled_assets["bezel"] = pygame.transform.smoothscale(
                 self.assets["bezel"], (WIDTH, HEIGHT)
-            )
-
-        if self.assets.get("left_needle") is not None:
-            surf = self.assets["left_needle"]
-            self.pre_scaled_assets["left_needle"] = pygame.transform.smoothscale(
-                surf,
-                (
-                    max(1, int(surf.get_width() * LEFT_NEEDLE_SCALE)),
-                    max(1, int(surf.get_height() * LEFT_NEEDLE_SCALE)),
-                ),
-            )
-
-        if self.assets.get("right_needle") is not None:
-            surf = self.assets["right_needle"]
-            self.pre_scaled_assets["right_needle"] = pygame.transform.smoothscale(
-                surf,
-                (
-                    max(1, int(surf.get_width() * RIGHT_NEEDLE_SCALE)),
-                    max(1, int(surf.get_height() * RIGHT_NEEDLE_SCALE)),
-                ),
             )
 
     def draw(self, data: CarData, use_live_smoothed: bool = True) -> None:
@@ -635,7 +654,8 @@ class DashApp:
             intake_c=data.intake_c,
             voltage=data.voltage,
             odometer_mi=data.odometer_mi,
-            est_hp=data.est_hp,
+            engine_load_pct=data.engine_load_pct,
+            boost_pct=data.boost_pct,
             inst_mpg=data.inst_mpg,
             connected=data.connected,
             source=data.source,
@@ -662,100 +682,96 @@ class DashApp:
 
     def draw_top_strip(self, data: CarData) -> None:
         ambient = self.font_big.render(self.format_temp_f(data.intake_c), True, WHITE)
-        self.screen.blit(ambient, (1200, 60))
+        self.screen.blit(ambient, self.pt(1200, 60))
 
     def draw_center_speed(self, data: CarData) -> None:
         speed = self.font_speed.render(str(int(round(data.speed_mph))), True, WHITE)
         mph = self.font_mph.render("MPH", True, WHITE)
-        speed_rect = speed.get_rect(center=(WIDTH // 2, 200))
-        mph_rect = mph.get_rect(midtop=(WIDTH // 2, 120))
+        speed_rect = speed.get_rect(center=(WIDTH // 2, self.dy(200)))
+        mph_rect = mph.get_rect(midtop=(WIDTH // 2, self.dy(120)))
         self.screen.blit(speed, speed_rect)
         self.screen.blit(mph, mph_rect)
 
         odo_value = self.font_mid.render(self.format_mileage(data.odometer_mi), True, SOFT)
-        odo_value_rect = odo_value.get_rect(center=(WIDTH // 2, 370))
+        odo_value_rect = odo_value.get_rect(center=(WIDTH // 2, self.dy(370)))
         self.screen.blit(odo_value, odo_value_rect)
 
     def draw_left_gauge(self, data: CarData) -> None:
         if self.pre_scaled_assets.get("left_dial") is not None:
-            self.draw_dial_asset("left_dial", LEFT_DIAL_CENTER, LEFT_DIAL_SIZE)
+            self.draw_dial_asset("left_dial", self.LEFT_DIAL_CENTER)
         else:
-            self.draw_speed_ring(LEFT_DIAL_CENTER, 170, 0, 160, data.speed_mph)
-            self.draw_fuel_subgauge((190, 325), data.fuel_pct)
+            self.draw_speed_ring(self.LEFT_DIAL_CENTER, self.ds(170), 0, 160, data.speed_mph)
+            self.draw_fuel_subgauge(self.pt(190, 325), data.fuel_pct)
 
-        if self.pre_scaled_assets.get("left_needle") is not None:
+        if self.assets.get("left_needle") is not None:
             angle = self.map_value_to_angle(
                 data.speed_mph, 0.0, 160.0, LEFT_NEEDLE_MIN_ANGLE, LEFT_NEEDLE_MAX_ANGLE
             )
             self.draw_rotated_needle(
                 "left_needle",
-                LEFT_DIAL_CENTER,
+                self.LEFT_DIAL_CENTER,
                 angle,
                 LEFT_NEEDLE_BASE_ANGLE,
                 LEFT_NEEDLE_SCALE,
                 LEFT_NEEDLE_PIVOT,
             )
         else:
-            self.draw_speed_needle(LEFT_DIAL_CENTER, 185, data.speed_mph, 160)
+            self.draw_speed_needle(self.LEFT_DIAL_CENTER, self.ds(185), data.speed_mph, 160)
 
         fuel_range = int((data.fuel_pct or 0) * 6.8)
         rng = self.font_mid.render(str(fuel_range), True, WHITE)
-        self.screen.blit(rng, (210, 338))
-        self.screen.blit(self.font_small.render("mi", True, WHITE), (245, 340))
+        self.screen.blit(rng, self.pt(210, 338))
+        self.screen.blit(self.font_small.render("mi", True, WHITE), self.pt(245, 340))
 
-        hp_label = self.font_mid.render("HP", True, SOFT)
-        hp_value = self.font_verybig.render(
-            "--" if data.est_hp is None else str(int(round(data.est_hp))),
-            True,
-            WHITE,
-        )
+        left_ring_center = self.pt(LEFT_DIAL_CENTER_BASE[0] - 52, LEFT_DIAL_CENTER_BASE[1] - 4)
+        right_ring_center = self.pt(LEFT_DIAL_CENTER_BASE[0] + 52, LEFT_DIAL_CENTER_BASE[1] - 4)
 
-        hp_label_rect = hp_label.get_rect(center=(LEFT_DIAL_CENTER[0], LEFT_DIAL_CENTER[1] - 20))
-        hp_value_rect = hp_value.get_rect(center=(LEFT_DIAL_CENTER[0], LEFT_DIAL_CENTER[1] + 8))
+        self.draw_mini_progress_ring(left_ring_center, self.ds(34), data.engine_load_pct, "Power", RED)
+        self.draw_mini_progress_ring(right_ring_center, self.ds(34), data.boost_pct, "Boost", RED)
 
-        self.screen.blit(hp_label, hp_label_rect)
-        self.screen.blit(hp_value, hp_value_rect)
-
-        mpg_label = self.font_tiny.render("CUR MPG", True, SOFT)
+        mpg_label = self.font_tiny.render("MPG", True, SOFT)
         mpg_value = self.font_mid.render(self.format_mpg(data.inst_mpg), True, WHITE)
 
-        mpg_label_rect = mpg_label.get_rect(center=(LEFT_DIAL_CENTER[0], LEFT_DIAL_CENTER[1] + 42))
-        mpg_value_rect = mpg_value.get_rect(center=(LEFT_DIAL_CENTER[0], LEFT_DIAL_CENTER[1] + 60))
-
-        self.screen.blit(mpg_label, mpg_label_rect)
-        self.screen.blit(mpg_value, mpg_value_rect)
+        self.screen.blit(
+            mpg_label,
+            mpg_label.get_rect(center=self.pt(LEFT_DIAL_CENTER_BASE[0], LEFT_DIAL_CENTER_BASE[1] + 58)),
+        )
+        self.screen.blit(
+            mpg_value,
+            mpg_value.get_rect(center=self.pt(LEFT_DIAL_CENTER_BASE[0], LEFT_DIAL_CENTER_BASE[1] + 76)),
+        )
 
     def draw_right_gauge(self, data: CarData) -> None:
         if self.pre_scaled_assets.get("right_dial") is not None:
-            self.draw_dial_asset("right_dial", RIGHT_DIAL_CENTER, RIGHT_DIAL_SIZE)
+            self.draw_dial_asset("right_dial", self.RIGHT_DIAL_CENTER)
         else:
-            self.draw_rpm_ring(RIGHT_DIAL_CENTER, 170, 0, 8, data.rpm / 1000.0)
-            self.draw_temp_subgauge((1090, 325), data.coolant_c)
+            self.draw_rpm_ring(self.RIGHT_DIAL_CENTER, self.ds(170), 0, 8, data.rpm / 1000.0)
+            self.draw_temp_subgauge(self.pt(1090, 325), data.coolant_c)
 
-        if self.pre_scaled_assets.get("right_needle") is not None:
+        if self.assets.get("right_needle") is not None:
             angle = self.map_value_to_angle(
                 data.rpm, 0.0, 8000.0, RIGHT_NEEDLE_MIN_ANGLE, RIGHT_NEEDLE_MAX_ANGLE
             )
             self.draw_rotated_needle(
                 "right_needle",
-                RIGHT_DIAL_CENTER,
+                self.RIGHT_DIAL_CENTER,
                 angle,
                 RIGHT_NEEDLE_BASE_ANGLE,
                 RIGHT_NEEDLE_SCALE,
                 RIGHT_NEEDLE_PIVOT,
             )
         else:
-            self.draw_rpm_needle(RIGHT_DIAL_CENTER, 165, data.rpm / 1000.0, 8)
+            self.draw_rpm_needle(self.RIGHT_DIAL_CENTER, self.ds(165), data.rpm / 1000.0, 8)
 
         rpm_digits = self.font_verybig.render(f"{int(round(data.rpm))}", True, WHITE)
         rpm_label = self.font_mid.render("RPM", True, SOFT)
-        rpm_rect = rpm_digits.get_rect(center=(RIGHT_DIAL_CENTER[0], RIGHT_DIAL_CENTER[1] + 5))
-        label_rect = rpm_label.get_rect(center=(RIGHT_DIAL_CENTER[0], RIGHT_DIAL_CENTER[1] - 20))
+        rpm_rect = rpm_digits.get_rect(center=self.pt(RIGHT_DIAL_CENTER_BASE[0], RIGHT_DIAL_CENTER_BASE[1] + 5))
+        label_rect = rpm_label.get_rect(center=self.pt(RIGHT_DIAL_CENTER_BASE[0], RIGHT_DIAL_CENTER_BASE[1] - 20))
         self.screen.blit(rpm_digits, rpm_rect)
         self.screen.blit(rpm_label, label_rect)
 
         rpm_raw_small = self.font_tiny.render(f"RAW {int(round(self.raw_rpm_live))}", True, SOFT)
-        rpm_raw_rect = rpm_raw_small.get_rect(center=(RIGHT_DIAL_CENTER[0], RIGHT_DIAL_CENTER[1] + 36))
+        rpm_raw_rect = rpm_raw_small.get_rect(center=self.pt(RIGHT_DIAL_CENTER_BASE[0], RIGHT_DIAL_CENTER_BASE[1] + 36))
         self.screen.blit(rpm_raw_small, rpm_raw_rect)
 
     def draw_shift_alert(self, data: CarData) -> None:
@@ -763,13 +779,13 @@ class DashApp:
         if rpm < 400:
             return
 
-        alert_y = 50
-        shape_w = 35
-        shape_h = 50
-        gap = 3
+        alert_y = self.dy(50)
+        shape_w = self.dx(35)
+        shape_h = self.dy(50)
+        gap = self.dx(3)
 
-        left_start_x = 550
-        right_start_x = 730
+        left_start_x = self.dx(550)
+        right_start_x = self.dx(730)
 
         flash_on = (pygame.time.get_ticks() // 180) % 2 == 0
         off_color = (35, 35, 35)
@@ -817,7 +833,7 @@ class DashApp:
         color: Tuple[int, int, int],
         flip: bool = False,
     ) -> None:
-        skew = w // 4
+        skew = max(1, w // 4)
 
         if not flip:
             points = [
@@ -837,9 +853,9 @@ class DashApp:
         pygame.draw.polygon(self.screen, color, points)
 
     def draw_bottom_cards(self, data: CarData) -> None:
-        bar = pygame.Rect(350, 392, 600, 56)
-        pygame.draw.rect(self.screen, (0, 0, 0), bar, border_radius=16)
-        pygame.draw.rect(self.screen, (40, 44, 52), bar, 1, border_radius=16)
+        bar = pygame.Rect(self.dx(350), self.dy(392), self.dx(600), self.dy(56))
+        pygame.draw.rect(self.screen, (0, 0, 0), bar, border_radius=self.ds(16))
+        pygame.draw.rect(self.screen, (40, 44, 52), bar, 1, border_radius=self.ds(16))
 
         cards = [
             ("COOLANT", self.format_temp_f(data.coolant_c), self.coolant_color(data.coolant_c), self.metric_ratio(0, data), ("C", "H")),
@@ -847,10 +863,10 @@ class DashApp:
             ("VOLTAGE", self.format_voltage(data.voltage), WHITE, self.metric_ratio(3, data), ("L", "H")),
         ]
 
-        x = 380
+        x = self.dx(380)
         for label, value, color, ratio, caps in cards:
-            self.draw_card(x, 401, label, value, color, ratio, caps)
-            x += 200
+            self.draw_card(x, self.dy(401), label, value, color, ratio, caps)
+            x += self.dx(200)
 
     def draw_card(
         self,
@@ -863,24 +879,24 @@ class DashApp:
         caps: Optional[Tuple[str, str]],
     ) -> None:
         self.screen.blit(self.font_tiny.render(label, True, WHITE), (x, y))
-        self.screen.blit(self.font_small.render(value, True, color), (x, y + 12))
+        self.screen.blit(self.font_small.render(value, True, color), (x, y + self.dy(12)))
         if ratio is not None and caps is not None:
-            bar_x, bar_y, bar_w, bar_h = x, y + 28, 86, 5
-            pygame.draw.rect(self.screen, (70, 74, 82), (bar_x, bar_y, bar_w, bar_h), border_radius=4)
+            bar_x, bar_y, bar_w, bar_h = x, y + self.dy(28), self.dx(86), max(2, self.dy(5))
+            pygame.draw.rect(self.screen, (70, 74, 82), (bar_x, bar_y, bar_w, bar_h), border_radius=self.ds(4))
             fill = int(bar_w * ratio)
             if fill > 0:
                 fill_color = RED if caps[1] == "H" and ratio > 0.82 else BLUE if label == "INTAKE" else WHITE
-                pygame.draw.rect(self.screen, fill_color, (bar_x, bar_y, fill, bar_h), border_radius=4)
-            self.screen.blit(self.font_tiny.render(caps[0], True, SOFT), (bar_x, bar_y + 7))
-            self.screen.blit(self.font_tiny.render(caps[1], True, RED if caps[1] == "H" else SOFT), (bar_x + 78, bar_y + 7))
+                pygame.draw.rect(self.screen, fill_color, (bar_x, bar_y, fill, bar_h), border_radius=self.ds(4))
+            self.screen.blit(self.font_tiny.render(caps[0], True, SOFT), (bar_x, bar_y + self.dy(7)))
+            self.screen.blit(self.font_tiny.render(caps[1], True, RED if caps[1] == "H" else SOFT), (bar_x + self.dx(78), bar_y + self.dy(7)))
 
     def draw_footer(self, data: CarData) -> None:
-        self.screen.blit(self.font_tiny.render(time.strftime("%I:%M %p").lstrip("0"), True, SOFT), (120, 456))
+        self.screen.blit(self.font_tiny.render(time.strftime("%I:%M %p").lstrip("0"), True, SOFT), self.pt(120, 456))
         status = "LIVE OBD" if data.connected and data.source == "obd" else "DEMO MODE"
         status_color = GREEN if status == "LIVE OBD" else AMBER
         msg = self.font_tiny.render(f"{status}  |  F11 fullscreen  |  D toggle mode", True, status_color)
-        self.screen.blit(msg, (465, 456))
-        self.screen.blit(self.font_tiny.render(time.strftime("%m/%d/%Y"), True, SOFT), (1085, 456))
+        self.screen.blit(msg, self.pt(465, 456))
+        self.screen.blit(self.font_tiny.render(time.strftime("%m/%d/%Y"), True, SOFT), self.pt(1085, 456))
 
     def draw_optional_overlay(self) -> None:
         bezel = self.pre_scaled_assets.get("bezel")
@@ -888,7 +904,7 @@ class DashApp:
             return
         self.screen.blit(bezel, (0, 0))
 
-    def draw_dial_asset(self, key: str, center: Tuple[int, int], size: int) -> None:
+    def draw_dial_asset(self, key: str, center: Tuple[int, int], size: int | None = None) -> None:
         surf = self.pre_scaled_assets.get(key)
         if surf is None:
             return
@@ -904,25 +920,128 @@ class DashApp:
         scale: float,
         pivot_norm: Tuple[float, float],
     ) -> None:
-        surf = self.pre_scaled_assets.get(key)
+        surf = self.assets.get(key)
         if surf is None:
             return
 
-        scaled_w = surf.get_width()
-        scaled_h = surf.get_height()
+        upscale = 3
+
+        hi_w = max(1, int(surf.get_width() * scale * self.savg * upscale))
+        hi_h = max(1, int(surf.get_height() * scale * self.savg * upscale))
+        hi_surf = pygame.transform.smoothscale(surf, (hi_w, hi_h))
 
         rotation = -(angle - base_angle)
-        rotated = pygame.transform.rotate(surf, rotation)
+        rotated_hi = pygame.transform.rotate(hi_surf, rotation)
 
-        pivot_x = scaled_w * pivot_norm[0]
-        pivot_y = scaled_h * pivot_norm[1]
-        image_center = pygame.math.Vector2(scaled_w / 2, scaled_h / 2)
+        pivot_x = hi_w * pivot_norm[0]
+        pivot_y = hi_h * pivot_norm[1]
+        image_center = pygame.math.Vector2(hi_w / 2, hi_h / 2)
         pivot_vector = pygame.math.Vector2(pivot_x, pivot_y) - image_center
         rotated_offset = pivot_vector.rotate(rotation)
 
-        draw_center = pygame.math.Vector2(center[0], center[1]) - rotated_offset
-        rect = rotated.get_rect(center=(round(draw_center.x), round(draw_center.y)))
+        draw_center_hi = pygame.math.Vector2(center[0] * upscale, center[1] * upscale) - rotated_offset
+        rect_hi = rotated_hi.get_rect(center=(round(draw_center_hi.x), round(draw_center_hi.y)))
+
+        final_w = max(1, rotated_hi.get_width() // upscale)
+        final_h = max(1, rotated_hi.get_height() // upscale)
+        rotated = pygame.transform.smoothscale(rotated_hi, (final_w, final_h))
+
+        rect = rotated.get_rect(center=(round(rect_hi.centerx / upscale), round(rect_hi.centery / upscale)))
         self.screen.blit(rotated, rect)
+
+    def draw_ring_progress_aa(
+        self,
+        center: Tuple[int, int],
+        radius: int,
+        pct: float,
+        color: Tuple[int, int, int],
+        bg_color: Tuple[int, int, int],
+        thickness: int = 8,
+        upscale: int = 4,
+    ) -> None:
+        pct = max(0.0, min(100.0, pct))
+
+        surf_size = int((radius + thickness + self.ds(8)) * 2 * upscale)
+        surf = pygame.Surface((surf_size, surf_size), pygame.SRCALPHA)
+
+        cx = surf_size // 2
+        cy = surf_size // 2
+        radius_hi = int(radius * upscale)
+        thickness_hi = max(1, int(thickness * upscale))
+
+        pygame.draw.circle(
+            surf,
+            (*bg_color, 255),
+            (cx, cy),
+            radius_hi,
+            thickness_hi,
+        )
+
+        if pct > 0.0:
+            start_angle = -math.pi / 2
+            end_angle = start_angle + (2.0 * math.pi * (pct / 100.0))
+
+            arc_rect = pygame.Rect(
+                cx - radius_hi,
+                cy - radius_hi,
+                radius_hi * 2,
+                radius_hi * 2,
+            )
+
+            pygame.draw.arc(
+                surf,
+                (*color, 255),
+                arc_rect,
+                start_angle,
+                end_angle,
+                thickness_hi,
+            )
+
+        final_size = surf_size // upscale
+        smooth = pygame.transform.smoothscale(surf, (final_size, final_size))
+        rect = smooth.get_rect(center=center)
+        self.screen.blit(smooth, rect)
+
+    def draw_mini_progress_ring(
+        self,
+        center: Tuple[int, int],
+        radius: int,
+        value_pct: Optional[float],
+        label: str,
+        color: Tuple[int, int, int],
+    ) -> None:
+        pct = 0.0 if value_pct is None else max(0.0, min(100.0, value_pct))
+
+        ring_width = self.ds(8)
+        ring_bg = (55, 58, 66)
+        inner_fill = (20, 22, 28)
+        inner_outline = (42, 45, 52)
+
+        self.draw_ring_progress_aa(
+            center=center,
+            radius=radius,
+            pct=pct,
+            color=color,
+            bg_color=ring_bg,
+            thickness=ring_width,
+            upscale=4,
+        )
+
+        pygame.draw.circle(self.screen, inner_fill, center, radius - ring_width - self.ds(2))
+        pygame.draw.circle(self.screen, inner_outline, center, radius - ring_width - self.ds(2), 1)
+
+        value_text = "--" if value_pct is None else str(int(round(pct)))
+        value_surf = self.font_mid.render(value_text, True, WHITE)
+        value_rect = value_surf.get_rect(center=(center[0], center[1] - self.dy(2)))
+        self.screen.blit(value_surf, value_rect)
+
+        label_surf = self.font_tiny.render(label, True, SOFT)
+        label_rect = label_surf.get_rect(center=(center[0], center[1] - radius - self.dy(14)))
+        self.screen.blit(label_surf, label_rect)
+
+        pct_surf = self.font_tiny.render("%", True, SOFT)
+        pct_rect = pct_surf.get_rect(center=(center[0], center[1] + radius - self.dy(52)))
+        self.screen.blit(pct_surf, pct_rect)
 
     def draw_arc(
         self,
@@ -938,7 +1057,8 @@ class DashApp:
         for i in range(steps + 1):
             deg = start_deg + (end_deg - start_deg) * (i / steps)
             points.append(self.polar(center, radius, deg))
-        pygame.draw.lines(self.screen, color, False, points, width)
+        if len(points) >= 2:
+            pygame.draw.lines(self.screen, color, False, points, width)
 
     @staticmethod
     def polar(center: Tuple[int, int], radius: float, deg: float) -> Tuple[int, int]:
@@ -954,36 +1074,36 @@ class DashApp:
 
     def draw_speed_ring(self, center: Tuple[int, int], radius: int, min_value: int, max_value: int, value: float) -> None:
         start_deg, end_deg = 138, 402
-        self.draw_arc(center, radius, start_deg, end_deg, WHITE, 3)
-        self.draw_arc(center, radius - 22, start_deg, end_deg, (180, 180, 184), 1)
+        self.draw_arc(center, radius, start_deg, end_deg, WHITE, max(1, self.ds(3)))
+        self.draw_arc(center, radius - self.ds(22), start_deg, end_deg, (180, 180, 184), 1)
         for i, tick in enumerate(range(min_value, max_value + 1, 10)):
             ratio = i / ((max_value - min_value) / 10)
             deg = start_deg + (end_deg - start_deg) * ratio
-            outer = self.polar(center, radius - 2, deg)
-            inner = self.polar(center, radius - 24, deg)
-            pygame.draw.line(self.screen, WHITE, outer, inner, 3)
+            outer = self.polar(center, radius - self.ds(2), deg)
+            inner = self.polar(center, radius - self.ds(24), deg)
+            pygame.draw.line(self.screen, WHITE, outer, inner, max(1, self.ds(3)))
             if tick % 20 == 0:
-                txt_pt = self.polar(center, radius - 52, deg)
+                txt_pt = self.polar(center, radius - self.ds(52), deg)
                 txt = self.font_tick.render(str(tick), True, WHITE)
                 self.screen.blit(txt, txt.get_rect(center=txt_pt))
-        self.screen.blit(self.font_mid.render("MPH", True, SOFT), (77, 285))
+        self.screen.blit(self.font_mid.render("MPH", True, SOFT), self.pt(77, 285))
 
     def draw_rpm_ring(self, center: Tuple[int, int], radius: int, min_value: int, max_value: int, value: float) -> None:
         start_deg, end_deg = -42, 222
-        self.draw_arc(center, radius, start_deg, end_deg, WHITE, 3)
-        self.draw_arc(center, radius - 22, start_deg, end_deg, (180, 180, 184), 1)
-        self.draw_arc(center, radius, -42, 42, RED_DARK, 14)
+        self.draw_arc(center, radius, start_deg, end_deg, WHITE, max(1, self.ds(3)))
+        self.draw_arc(center, radius - self.ds(22), start_deg, end_deg, (180, 180, 184), 1)
+        self.draw_arc(center, radius, -42, 42, RED_DARK, max(1, self.ds(14)))
         for i, tick in enumerate(range(min_value, max_value + 1)):
             ratio = i / (max_value - min_value)
             deg = start_deg + (end_deg - start_deg) * ratio
-            outer = self.polar(center, radius - 2, deg)
-            inner = self.polar(center, radius - 24, deg)
-            pygame.draw.line(self.screen, WHITE, outer, inner, 3)
-            txt_pt = self.polar(center, radius - 52, deg)
+            outer = self.polar(center, radius - self.ds(2), deg)
+            inner = self.polar(center, radius - self.ds(24), deg)
+            pygame.draw.line(self.screen, WHITE, outer, inner, max(1, self.ds(3)))
+            txt_pt = self.polar(center, radius - self.ds(52), deg)
             txt = self.font_big.render(str(tick), True, WHITE)
             self.screen.blit(txt, txt.get_rect(center=txt_pt))
-        self.screen.blit(self.font_mid.render("RPM", True, WHITE), (1172, 285))
-        self.screen.blit(self.font_tiny.render("x1000", True, SOFT), (1184, 303))
+        self.screen.blit(self.font_mid.render("RPM", True, WHITE), self.pt(1172, 285))
+        self.screen.blit(self.font_tiny.render("x1000", True, SOFT), self.pt(1184, 303))
 
     def draw_speed_needle(self, center: Tuple[int, int], length: int, value: float, max_value: float) -> None:
         deg = self.map_value_to_angle(value, 0.0, max_value, LEFT_NEEDLE_MIN_ANGLE, LEFT_NEEDLE_MAX_ANGLE)
@@ -996,27 +1116,27 @@ class DashApp:
     def draw_needle(self, center: Tuple[int, int], length: int, deg: float) -> None:
         start = self.polar(center, length * 0.55, deg)
         tip = self.polar(center, length, deg)
-        pygame.draw.line(self.screen, RED, start, tip, 3)
+        pygame.draw.line(self.screen, RED, start, tip, max(1, self.ds(3)))
 
     def draw_fuel_subgauge(self, center: Tuple[int, int], fuel_pct: Optional[float]) -> None:
         start_deg, end_deg = 205, 335
-        radius = 72
-        self.draw_arc(center, radius, start_deg, end_deg, (75, 78, 85), 8)
+        radius = self.ds(72)
+        self.draw_arc(center, radius, start_deg, end_deg, (75, 78, 85), self.ds(8))
         ratio = 0.0 if fuel_pct is None else max(0.0, min(1.0, fuel_pct / 100.0))
-        self.draw_arc(center, radius, start_deg, start_deg + (end_deg - start_deg) * ratio, WHITE, 8)
-        self.draw_arc(center, radius, start_deg, start_deg + 18, RED, 8)
-        self.screen.blit(self.font_small.render("E", True, RED), (126, 335))
-        self.screen.blit(self.font_small.render("F", True, WHITE), (250, 335))
+        self.draw_arc(center, radius, start_deg, start_deg + (end_deg - start_deg) * ratio, WHITE, self.ds(8))
+        self.draw_arc(center, radius, start_deg, start_deg + 18, RED, self.ds(8))
+        self.screen.blit(self.font_small.render("E", True, RED), self.pt(126, 335))
+        self.screen.blit(self.font_small.render("F", True, WHITE), self.pt(250, 335))
 
     def draw_temp_subgauge(self, center: Tuple[int, int], coolant_c: Optional[float]) -> None:
         start_deg, end_deg = 205, 335
-        radius = 72
-        self.draw_arc(center, radius, start_deg, end_deg, (75, 78, 85), 8)
+        radius = self.ds(72)
+        self.draw_arc(center, radius, start_deg, end_deg, (75, 78, 85), self.ds(8))
         ratio = 0.0 if coolant_c is None else max(0.0, min(1.0, (coolant_c - 50) / 70.0))
-        self.draw_arc(center, radius, start_deg, start_deg + (end_deg - start_deg) * ratio, WHITE, 8)
-        self.draw_arc(center, radius, end_deg - 18, end_deg, RED, 8)
-        self.screen.blit(self.font_small.render("C", True, WHITE), (1026, 335))
-        self.screen.blit(self.font_small.render("H", True, RED), (1150, 335))
+        self.draw_arc(center, radius, start_deg, start_deg + (end_deg - start_deg) * ratio, WHITE, self.ds(8))
+        self.draw_arc(center, radius, end_deg - 18, end_deg, RED, self.ds(8))
+        self.screen.blit(self.font_small.render("C", True, WHITE), self.pt(1026, 335))
+        self.screen.blit(self.font_small.render("H", True, RED), self.pt(1150, 335))
 
     @staticmethod
     def format_temp_f(value_c: Optional[float]) -> str:
